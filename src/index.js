@@ -18,6 +18,14 @@ export default {
                         })
                     });
 
+                    if (response.status === 424) {
+                        return new Response(JSON.stringify({
+                            response: "Prompt blocked due to security configurations"
+                        }), {
+                            headers: { 'Content-Type': 'application/json' }
+                        });
+                    }
+
                     if (!response.ok) {
                         throw new Error(`AI Gateway Error: ${response.status}`);
                     }
