@@ -17,8 +17,5 @@
     }
   	],
   	"workers_dev": false,
- 	"preview_urls": false,
-	"vars": {
-		"CHATGPT_MODEL": "gpt-4o-mini"
-	}
+ 	"preview_urls": false
 }

@@ -3,24 +3,75 @@ export default {
         if (request.url.endsWith('/api/chat')) {
             if (request.method === 'POST') {
                 try {
-                    const { messages } = await request.json();
-
-                    const response = await fetch(`https://gateway.ai.cloudflare.com/v1/${env.ACCOUNT_ID}/${env.GATEWAY_NAME}/openai/chat/completions`, {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'Authorization': `Bearer ${env.OPENAI_TOKEN}`,
-                            'cf-aig-authorization': `Bearer ${env.AI_GATEWAY_TOKEN}`,
-                        },
-                        body: JSON.stringify({
-                            model: env.CHATGPT_MODEL,
-                            messages: messages
-                        })
-                    });
-
+                    const { messages, modelProvider, modelName } = await request.json();
+                    
+                    let response;
+                    let result;
+                    let aiMessage;
+                    
+                    // Handle different model providers
+                    if (modelProvider === 'openai') {
+                        // Call OpenAI API
+                        response = await fetch(`https://gateway.ai.cloudflare.com/v1/${env.ACCOUNT_ID}/${env.GATEWAY_NAME}/openai/chat/completions`, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'Authorization': `Bearer ${env.OPENAI_TOKEN}`,
+                                'cf-aig-authorization': `Bearer ${env.AI_GATEWAY_TOKEN}`,
+                            },
+                            body: JSON.stringify({
+                                model: modelName,
+                                messages: messages
+                            })
+                        });
+                        
+                        if (response.ok) {
+                            result = await response.json();
+                            aiMessage = result.choices[0].message.content;
+                        }
+                    } 
+                    else if (modelProvider === 'workersai') {
+                        // Format messages for Workers AI API
+                        const formattedMessages = messages.map(msg => ({
+                            role: msg.role === 'user' ? 'user' : 'assistant',
+                            content: msg.content
+                        }));
+                        
+                        // Call Workers AI API
+                        response = await fetch(`https://gateway.ai.cloudflare.com/v1/${env.ACCOUNT_ID}/${env.GATEWAY_NAME}/workers-ai/v1/chat/completions`, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'Authorization': `Bearer ${env.WORKERSAI_TOKEN}`,
+                                'cf-aig-authorization': `Bearer ${env.AI_GATEWAY_TOKEN}`,
+                            },
+                            body: JSON.stringify({
+                                model: modelName,
+                                messages: formattedMessages,
+                                max_tokens: 1000
+                            })
+                        });
+                        
+                        if (response.ok) {
+                            result = await response.json();
+                            
+                            // Debug: Log response structure
+                            console.log('Workers AI response structure:', JSON.stringify(result));
+                            
+                            // Fixed: Workers AI has a different response structure
+                            // It should be result.response instead of result.content[0].text
+                            aiMessage = result.response || 
+                                       (result.choices && result.choices[0]?.message?.content) ||
+                                       (result.result?.response) ||
+                                       (result.result?.content) ||
+                                       "Unable to parse AI response";
+                        }
+                    }
+                    
                     if (response.status === 424) {
                         return new Response(JSON.stringify({
-                            response: "Prompt blocked due to security configurations"
+                            response: "Prompt blocked due to security configurations",
+                            modelProvider: modelProvider
                         }), {
                             headers: { 'Content-Type': 'application/json' }
                         });
@@ -30,17 +81,19 @@ export default {
                         throw new Error(`AI Gateway Error: ${response.status}`);
                     }
 
-                    const result = await response.json();
-                    const aiMessage = result.choices[0].message.content;
-
                     return new Response(JSON.stringify({
-                        response: markdownToHTML(aiMessage)
+                        response: markdownToHTML(aiMessage),
+                        modelProvider: modelProvider
                     }), {
                         headers: { 'Content-Type': 'application/json' }
                     });
 
                 } catch (error) {
-                    return new Response(JSON.stringify({ error: error.message }), {
+                    console.error("Error details:", error);
+                    return new Response(JSON.stringify({ 
+                        error: error.message,
+                        modelProvider: "error" 
+                    }), {
                         status: 500,
                         headers: { 'Content-Type': 'application/json' }
                     });
@@ -57,6 +110,8 @@ export default {
 
 // Improved Markdown to HTML converter
 function markdownToHTML(markdown) {
+    if (!markdown) return '';
+    
     // Escape HTML to prevent XSS attacks
     markdown = markdown
         .replace(/&/g, '&amp;')
@@ -124,6 +179,38 @@ const HTML = `<!DOCTYPE html>
             flex-direction: column;
         }
 
+        .header {
+            padding: 15px 20px;
+            background: #fff;
+            border-bottom: 1px solid #eee;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: 1.8rem;
+        }
+
+        .model-selector {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .model-selector label {
+            font-weight: 500;
+        }
+
+        select {
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+            background: white;
+        }
+
         .chat-messages {
             flex: 1;
             padding: 20px;
@@ -146,6 +233,14 @@ const HTML = `<!DOCTYPE html>
         .ai-message {
             background: #fff;
             box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+        }
+
+        .ai-message.openai {
+            border-left: 4px solid #10a37f; /* OpenAI green */
+        }
+
+        .ai-message.workersai {
+            border-left: 4px solid #ff6700; /* Workers AI orange */
         }
 
         .input-container {
@@ -175,9 +270,9 @@ const HTML = `<!DOCTYPE html>
             font-size: 16px;
         }
 
-        h1 {
-            text-align: center;
-            margin-bottom: 20px;
+        button:disabled {
+            background: #cccccc;
+            cursor: not-allowed;
         }
 
         pre, code {
@@ -186,12 +281,53 @@ const HTML = `<!DOCTYPE html>
             border-radius: 4px;
             overflow-x: auto;
         }
+        
+        .model-info {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 12px;
+            color: #666;
+            margin-top: 4px;
+        }
+        
+        .model-badge {
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-weight: 500;
+        }
+        
+        .model-badge.openai {
+            background-color: rgba(16, 163, 127, 0.1);
+            color: #10a37f;
+        }
+        
+        .model-badge.workersai {
+            background-color: rgba(255, 103, 0, 0.1);
+            color: #ff6700;
+        }
     </style>
 </head>
 
 <body>
     <div class="chat-container">
-        <h1>Corporate AI LLM</h1>
+        <div class="header">
+            <h1>Corporate AI LLM</h1>
+            <div class="model-selector">
+                <label for="modelProviderSelect">Provider:</label>
+                <select id="modelProviderSelect" onchange="updateModelOptions()">
+                    <option value="openai">OpenAI</option>
+                    <option value="workersai">CF WorkersAI</option>
+                </select>
+                
+                <label for="modelNameSelect">Model:</label>
+                <select id="modelNameSelect">
+                    <!-- OpenAI models (default) -->
+                    <option value="gpt-4o-mini">gpt-4o-mini</option>
+                    <option value="gpt-4.5-preview">gpt-4.5-preview</option>
+                </select>
+            </div>
+        </div>
         <div class="chat-messages" id="messages"></div>
         <div class="input-container">
             <input type="text" id="userInput" placeholder="Type your message..." />
@@ -204,6 +340,36 @@ const HTML = `<!DOCTYPE html>
         const messagesDiv = document.getElementById('messages');
         const userInput = document.getElementById('userInput');
         const sendButton = document.getElementById('sendButton');
+        const modelProviderSelect = document.getElementById('modelProviderSelect');
+        const modelNameSelect = document.getElementById('modelNameSelect');
+
+        // Enter key to send message
+        userInput.addEventListener('keyup', function(event) {
+            if (event.key === 'Enter') {
+                sendMessage();
+            }
+        });
+        
+        // Update model options based on selected provider
+        function updateModelOptions() {
+            const provider = modelProviderSelect.value;
+            modelNameSelect.innerHTML = ''; // Clear existing options
+            
+            if (provider === 'openai') {
+                addOption(modelNameSelect, 'gpt-4o-mini', 'gpt-4o-mini');
+                addOption(modelNameSelect, 'gpt-4.5-preview', 'gpt-4.5-preview');
+            } else if (provider === 'workersai') {
+                addOption(modelNameSelect, '@cf/meta/llama-2-7b-chat-fp16', 'llama');
+                addOption(modelNameSelect, '@cf/mistral/mistral-7b-instruct-v0.1', 'mistral');
+            }
+        }
+        
+        function addOption(selectElement, value, text) {
+            const option = document.createElement('option');
+            option.value = value;
+            option.textContent = text;
+            selectElement.appendChild(option);
+        }
 
         async function sendMessage() {
             const content = userInput.value.trim();
@@ -216,26 +382,90 @@ const HTML = `<!DOCTYPE html>
             appendMessage('user', content);
             userInput.value = '';
 
-            const response = await fetch('/api/chat', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ messages })
-            });
+            const modelProvider = modelProviderSelect.value;
+            const modelName = modelNameSelect.value;
 
-            const result = await response.json();
-            appendMessage('ai', result.response);
+            try {
+                const response = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        messages: messages,
+                        modelProvider: modelProvider,
+                        modelName: modelName
+                    })
+                });
 
-            userInput.disabled = false;
-            sendButton.disabled = false;
+                if (!response.ok) {
+                    throw new Error('Network response was not ok');
+                }
+
+                const result = await response.json();
+                
+                if (result.error) {
+                    appendMessage('ai', '<p>Error: ' + result.error + '</p>', modelProvider);
+                } else {
+                    appendMessage('ai', result.response, modelProvider, modelName);
+                    messages.push({ role: 'assistant', content: result.response });
+                }
+            } catch (error) {
+                appendMessage('ai', '<p>Error: Failed to communicate with the server. Please try again.</p>', 'error');
+                console.error('Error:', error);
+            } finally {
+                userInput.disabled = false;
+                sendButton.disabled = false;
+                userInput.focus();
+            }
         }
 
-        function appendMessage(role, content) {
+        function appendMessage(role, content, provider, modelName) {
             const messageDiv = document.createElement('div');
             messageDiv.className = 'message ' + role + '-message';
+            
+            // Add provider-specific class for styling
+            if (role === 'ai' && provider) {
+                messageDiv.classList.add(provider);
+            }
+            
+            // Add the message content
             messageDiv.innerHTML = content;
+            
+            // Add model info badge for AI messages
+            if (role === 'ai' && provider && provider !== 'error') {
+                const modelInfo = document.createElement('div');
+                modelInfo.className = 'model-info';
+                
+                const modelBadge = document.createElement('span');
+                modelBadge.className = 'model-badge ' + provider;
+                
+                // Update to correctly show provider name
+                const displayName = provider === 'openai' ? 'OpenAI' : 'CF WorkersAI';
+                
+                // Get a readable model name part
+                let displayModel = modelName;
+                if (modelName.includes('/')) {
+                    // Extract the last part for WorkersAI models
+                    const parts = modelName.split('/');
+                    displayModel = parts[parts.length-1];
+                } else if (modelName.includes('-')) {
+                    // Extract relevant part for OpenAI models
+                    //const parts = modelName.split('-');
+                    //displayModel = parts[parts.length-1];
+					displayModel = modelName
+                }
+                
+                modelBadge.textContent = displayName + ' ' + displayModel;
+                
+                modelInfo.appendChild(modelBadge);
+                messageDiv.appendChild(modelInfo);
+            }
+            
             messagesDiv.appendChild(messageDiv);
             messagesDiv.scrollTop = messagesDiv.scrollHeight;
         }
+        
+        // Initialize the page
+        updateModelOptions();
     </script>
 
 </body>
