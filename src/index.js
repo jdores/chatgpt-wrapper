@@ -31,26 +31,44 @@ export default {
                         }
                     } 
                     else if (modelProvider === 'workersai') {
-                        // Format messages for Workers AI API
-                        const formattedMessages = messages.map(msg => ({
-                            role: msg.role === 'user' ? 'user' : 'assistant',
-                            content: msg.content
-                        }));
-                        
-                        // Call Workers AI API
-                        response = await fetch(`https://gateway.ai.cloudflare.com/v1/${env.ACCOUNT_ID}/${env.GATEWAY_NAME}/workers-ai/v1/chat/completions`, {
-                            method: 'POST',
-                            headers: {
-                                'Content-Type': 'application/json',
-                                'Authorization': `Bearer ${env.WORKERSAI_TOKEN}`,
-                                'cf-aig-authorization': `Bearer ${env.AI_GATEWAY_TOKEN}`,
-                            },
-                            body: JSON.stringify({
-                                model: modelName,
-                                messages: formattedMessages,
-                                max_tokens: 1000
-                            })
-                        });
+                        // Check if it's a GPT OSS model (uses different API)
+                        if (modelName.includes('gpt-oss')) {
+                            // GPT OSS models use the responses API with 'input' parameter
+                            const userMessage = messages[messages.length - 1]?.content || '';
+                            
+                            response = await fetch(`https://gateway.ai.cloudflare.com/v1/${env.ACCOUNT_ID}/${env.GATEWAY_NAME}/workers-ai/${modelName}`, {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                    'Authorization': `Bearer ${env.WORKERSAI_TOKEN}`,
+                                    'cf-aig-authorization': `Bearer ${env.AI_GATEWAY_TOKEN}`,
+                                },
+                                body: JSON.stringify({
+                                    input: userMessage
+                                })
+                            });
+                        } else {
+                            // Format messages for standard Workers AI chat completions API
+                            const formattedMessages = messages.map(msg => ({
+                                role: msg.role === 'user' ? 'user' : 'assistant',
+                                content: msg.content
+                            }));
+                            
+                            // Call Workers AI chat completions API
+                            response = await fetch(`https://gateway.ai.cloudflare.com/v1/${env.ACCOUNT_ID}/${env.GATEWAY_NAME}/workers-ai/v1/chat/completions`, {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                    'Authorization': `Bearer ${env.WORKERSAI_TOKEN}`,
+                                    'cf-aig-authorization': `Bearer ${env.AI_GATEWAY_TOKEN}`,
+                                },
+                                body: JSON.stringify({
+                                    model: modelName,
+                                    messages: formattedMessages,
+                                    max_tokens: 1000
+                                })
+                            });
+                        }
                         
                         if (response.ok) {
                             result = await response.json();
@@ -58,13 +76,25 @@ export default {
                             // Debug: Log response structure
                             console.log('Workers AI response structure:', JSON.stringify(result));
                             
-                            // Fixed: Workers AI has a different response structure
-                            // It should be result.response instead of result.content[0].text
-                            aiMessage = result.response || 
-                                       (result.choices && result.choices[0]?.message?.content) ||
-                                       (result.result?.response) ||
-                                       (result.result?.content) ||
-                                       "Unable to parse AI response";
+                            // Handle different response formats
+                            if (modelName.includes('gpt-oss')) {
+                                // GPT OSS models have complex nested structure
+                                // Look for the message output in result.output array
+                                const outputs = result.result?.output || [];
+                                const messageOutput = outputs.find(output => output.type === 'message');
+                                if (messageOutput && messageOutput.content && messageOutput.content[0]) {
+                                    aiMessage = messageOutput.content[0].text;
+                                } else {
+                                    aiMessage = "Unable to parse GPT OSS response";
+                                }
+                            } else {
+                                // Standard chat completion models
+                                aiMessage = result.response || 
+                                           (result.choices && result.choices[0]?.message?.content) ||
+                                           (result.result?.response) ||
+                                           (result.result?.content) ||
+                                           "Unable to parse AI response";
+                            }
                         }
                     }
                     
@@ -78,7 +108,9 @@ export default {
                     }
 
                     if (!response.ok) {
-                        throw new Error(`AI Gateway Error: ${response.status}`);
+                        const errorText = await response.text();
+                        console.error(`AI Gateway Error: ${response.status} - ${errorText}`);
+                        throw new Error(`AI Gateway Error: ${response.status} - ${errorText}`);
                     }
 
                     return new Response(JSON.stringify({
@@ -359,8 +391,11 @@ const HTML = `<!DOCTYPE html>
                 addOption(modelNameSelect, 'gpt-4o-mini', 'gpt-4o-mini');
                 addOption(modelNameSelect, 'gpt-4.5-preview', 'gpt-4.5-preview');
             } else if (provider === 'workersai') {
-                addOption(modelNameSelect, '@cf/meta/llama-2-7b-chat-fp16', 'llama');
-                addOption(modelNameSelect, '@cf/mistral/mistral-7b-instruct-v0.1', 'mistral');
+                addOption(modelNameSelect, '@cf/meta/llama-3.1-8b-instruct', 'Llama 3.1 8B');
+                addOption(modelNameSelect, '@cf/meta/llama-3.2-3b-instruct', 'Llama 3.2 3B');
+                addOption(modelNameSelect, '@cf/mistral/mistral-7b-instruct-v0.1', 'Mistral 7B');
+                addOption(modelNameSelect, '@cf/deepseek-ai/deepseek-r1-distill-qwen-32b', 'DeepSeek R1');
+                addOption(modelNameSelect, '@cf/openai/gpt-oss-20b', 'GPT OSS 20B');
             }
         }
         
